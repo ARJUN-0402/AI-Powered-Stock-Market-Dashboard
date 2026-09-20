@@ -88,18 +88,18 @@ def _resolve_inputs(
     model: Any,
     features: pd.DataFrame,
     preprocessor: FeaturePreprocessor | None,
-) -> tuple[Any, FeaturePreprocessor | None, pd.DataFrame, list[str]]:
+) -> tuple[Any, FeaturePreprocessor | None, pd.DataFrame, list[str], ModelBundle | None]:
     if isinstance(model, ModelBundle):
         transformed = model.preprocessor.transform(features)
-        return model.estimator, model.preprocessor, transformed, list(model.feature_names)
+        return model.estimator, model.preprocessor, transformed, list(model.feature_names), model
     if isinstance(model, str):
         bundle = load_model_bundle(model)
         transformed = bundle.preprocessor.transform(features)
-        return bundle.estimator, bundle.preprocessor, transformed, list(bundle.feature_names)
+        return bundle.estimator, bundle.preprocessor, transformed, list(bundle.feature_names), bundle
     if preprocessor is not None:
         transformed = preprocessor.transform(features)
-        return model, preprocessor, transformed, list(preprocessor.fitted_feature_names_)
-    return model, None, features, list(features.columns)
+        return model, preprocessor, transformed, list(preprocessor.fitted_feature_names_), None
+    return model, None, features, list(features.columns), None
 
 
 def predict(
@@ -115,6 +115,14 @@ def predict(
     timestamp = _utc_now()
     feature_timestamp = as_of or _index_timestamp(features.index if features is not None else None)
     if model is None or features is None or not isinstance(features, pd.DataFrame) or features.empty:
+        bundle_metadata = None
+        if isinstance(model, ModelBundle):
+            bundle_metadata = model.metadata
+        elif isinstance(model, str):
+            try:
+                bundle_metadata = load_model_bundle(model).metadata
+            except Exception:
+                bundle_metadata = None
         return PredictionResult(
             symbol=symbol,
             prediction="unavailable",
@@ -122,13 +130,15 @@ def predict(
             confidence=None,
             up_probability=None,
             down_probability=None,
-            model_version=getattr(getattr(model, "metadata", None), "model_version", None),
-            model_name=getattr(getattr(model, "metadata", None), "model_name", None),
+            model_version=getattr(bundle_metadata, "model_version", None),
+            model_name=getattr(bundle_metadata, "model_name", None),
             timestamp=timestamp,
             as_of=feature_timestamp,
         )
     try:
-        estimator, _, transformed, feature_names = _resolve_inputs(model, features, preprocessor)
+        estimator, _, transformed, feature_names, bundle = _resolve_inputs(
+            model, features, preprocessor
+        )
         if transformed.empty:
             raise ValueError("no transformed rows are available")
         row = transformed.iloc[[-1]]
@@ -141,7 +151,7 @@ def predict(
         up, down = up / total, down / total
         predicted = "up" if up >= down else "down"
         winning = max(up, down)
-        metadata = getattr(model, "metadata", None)
+        metadata = getattr(bundle, "metadata", None) if bundle is not None else None
         explanation: tuple[dict[str, Any], ...] = ()
         try:
             explanation = tuple(
@@ -163,6 +173,14 @@ def predict(
             explanation=explanation,
         )
     except (KeyError, TypeError, ValueError):
+        bundle_metadata = None
+        if isinstance(model, ModelBundle):
+            bundle_metadata = model.metadata
+        elif isinstance(model, str):
+            try:
+                bundle_metadata = load_model_bundle(model).metadata
+            except Exception:
+                bundle_metadata = None
         return PredictionResult(
             symbol=symbol,
             prediction="unavailable",
@@ -170,8 +188,8 @@ def predict(
             confidence=None,
             up_probability=None,
             down_probability=None,
-            model_version=getattr(getattr(model, "metadata", None), "model_version", None),
-            model_name=getattr(getattr(model, "metadata", None), "model_name", None),
+            model_version=getattr(bundle_metadata, "model_version", None),
+            model_name=getattr(bundle_metadata, "model_name", None),
             timestamp=timestamp,
             as_of=feature_timestamp,
         )

@@ -74,11 +74,13 @@ def _feature_groups(feature_names: Iterable[str]) -> dict[str, tuple[str, ...]]:
 
     names = list(feature_names)
     groups = {group: tuple(name for name in values if name in names) for group, values in FEATURE_GROUPS.items()}
+    all_feature_names = set(name for values in groups.values() for name in values)
     context_suffixes = ("_return_1", "_volatility_20", "_volatility_indicator")
     context_names = tuple(
         name
         for name in names
         if any(name.endswith(suffix) for suffix in context_suffixes)
+        and name not in all_feature_names
     )
     if context_names:
         groups["market_context"] = context_names
