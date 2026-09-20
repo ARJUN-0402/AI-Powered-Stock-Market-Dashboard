@@ -227,7 +227,7 @@ def build_target(
         raise ValueError("threshold must be non-negative")
     frame = _validate_frame(data)
     close = pd.to_numeric(frame[price_column], errors="coerce")
-    forward_return = close.shift(-horizon) / close - 1
+    forward_return = _safe_ratio(close.shift(-horizon), close) - 1
     target = pd.Series(np.nan, index=frame.index, dtype=float, name=f"target_{horizon}d")
     target[forward_return > threshold] = 1
     target[forward_return < -threshold] = 0

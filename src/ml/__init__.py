@@ -1,9 +1,9 @@
-"""Machine learning package.
+"""Machine learning package for educational market-direction prediction.
 
-This package is intentionally lightweight in the current refactor. It
-provides thin interfaces that the rest of the codebase can rely on without
-tying the application to any specific model implementation. Advanced
-models will be added in a follow-up.
+Provides a full pipeline: feature engineering, target construction, time-aware
+training, evaluation, prediction, and explainability. The pipeline predicts
+next-period market direction (up/down) as a binary classification problem with
+explicit calibration, leakage guards, and educational disclaimers.
 """
 
 from __future__ import annotations

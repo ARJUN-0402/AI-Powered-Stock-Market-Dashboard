@@ -347,8 +347,16 @@ def train_models(
 
     selection = compare_model_metrics(selection_results, primary_metric=config.primary_metric)
     selected_name = selection["selected_model"]
-    for name, comparison in comparisons.items():
-        comparison.selected = name == selected_name
+    comparisons = {
+        name: ModelComparison(
+            model_name=comparison.model_name,
+            validation_metrics=comparison.validation_metrics,
+            test_metrics=comparison.test_metrics,
+            baseline_metrics=comparison.baseline_metrics,
+            selected=(name == selected_name),
+        )
+        for name, comparison in comparisons.items()
+    }
     split_info = {
         "train_rows": len(train_features),
         "validation_rows": len(validation_features),
