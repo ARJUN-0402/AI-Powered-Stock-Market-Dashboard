@@ -386,6 +386,8 @@ def train_model(
     aligned_features, aligned_target = align_features_target(features, target)
     if aligned_features.empty:
         return None if model is None else model
+    if aligned_target.nunique() < 2:
+        raise ValueError("training target must contain both direction classes")
     estimator = model
     if estimator is None:
         estimator = LogisticRegression(

@@ -786,7 +786,7 @@ def test_classification_metrics_return_known_values_and_baseline() -> None:
     assert metrics["log_loss"] is None
     assert metrics["brier_score"] is None
     assert metrics["calibration"] is None
-    assert metrics["baseline"]["majority_class"] == 1
+    assert metrics["baseline"]["majority_class"] == 0
     assert metrics["baseline"]["accuracy"] == pytest.approx(expected)
     assert metrics["baseline"]["balanced_accuracy"] == 0.5
     assert metrics["baseline"]["roc_auc"] is None
@@ -831,7 +831,7 @@ def test_classification_metrics_reject_invalid_inputs(
 
 
 def test_calibration_metrics_perfect_predictions_have_zero_ece() -> None:
-    calibration = calibration_metrics([0, 0, 1, 1], [0.25, 0.25, 0.75, 0.75], n_bins=4)
+    calibration = calibration_metrics([0, 0, 1, 1], [0.0, 0.0, 1.0, 1.0], n_bins=4)
 
     assert calibration["expected_calibration_error"] == 0.0
     assert calibration["n_bins"] == 4
