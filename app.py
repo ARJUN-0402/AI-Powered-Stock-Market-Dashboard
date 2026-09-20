@@ -1,33 +1,84 @@
-import streamlit as st
-import yfinance as yf
+"""Streamlit entrypoint for the AI-Powered Stock Market Dashboard.
+
+This file is intentionally thin: it orchestrates layout and delegates every
+business logic step to a service module under :mod:`src`. Keeping the UI
+layer free of analytics means the same services can be reused from
+notebooks, scripts or tests.
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
-import numpy as np
-import time
-import requests
-from textblob import TextBlob
-import nltk
-import warnings
-warnings.filterwarnings('ignore')
+import streamlit as st
 
-# Download required NLTK data for TextBlob
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('averaged_perceptron_tagger', quiet=True)
-except:
-    pass
-
-# Set page config for wide layout
-st.set_page_config(
-    page_title="AI-Powered Stock Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from src.alerts.alert_engine import (
+    Alert,
+    alerts_have_negative,
+    alerts_have_positive,
+    generate_alerts,
+)
+from src.config import CONFIG
+from src.data.market_data_service import (
+    InvalidSymbolError,
+    MarketDataError,
+    MarketDataService,
+    SymbolNotFoundError,
+    get_current_price,
+    get_default_service,
+)
+from src.data.news_service import (
+    AggregateSentiment,
+    ArticleSentiment,
+    NewsDataError,
+    NewsDataService,
+)
+from src.data.news_service import (
+    get_default_service as get_default_news_service,
+)
+from src.features.technical_indicators import (
+    calculate_macd,
+    calculate_moving_averages,
+    calculate_rsi,
+    latest_value,
+)
+from src.ml.explainability import explain_model, explain_prediction
+from src.ml.prediction import PredictionResult, predict_from_history
+from src.ml.preprocessing import (
+    align_features_target,
+    build_feature_frame,
+    build_target,
+    time_aware_split,
+)
+from src.ml.training import (
+    ModelBundle,
+    TrainingConfig,
+    train_models,
+)
+from src.portfolio.portfolio_engine import Holding, summarise_price_frame
+from src.utils.logging import configure_logging, get_logger
+from src.utils.numeric import is_nan
+from src.utils.validation import safe_float
+from src.visualization.charts import (
+    create_aggregate_sentiment_chart,
+    create_atr_chart,
+    create_bollinger_chart,
+    create_candlestick_chart,
+    create_drawdown_chart,
+    create_macd_chart,
+    create_mini_chart,
+    create_obv_chart,
+    create_rsi_chart,
+    create_sentiment_breakdown_chart,
+    create_sentiment_trend_chart,
+    create_stochastic_chart,
+    create_volatility_chart,
+    create_volume_chart,
 )
 
-# Custom CSS for dark mode trading terminal style
-st.markdown("""
+logger = get_logger(__name__)
+
+
+_CSS = """
 <style>
     :root {
         --background-color: #0d1117;
@@ -38,61 +89,54 @@ st.markdown("""
         --negative-color: #f85149;
         --border-color: #30363d;
     }
-    
+
     body {
         background-color: var(--background-color);
         color: var(--text-color);
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
-    
+
     .stApp {
         background-color: var(--background-color);
     }
-    
+
     .css-1d391kg {
         background-color: var(--card-background);
     }
-    
+
     .st-bx {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
     }
-    
+
     .st-cs {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
     }
-    
+
     .css-1offfwp {
         background-color: var(--card-background);
     }
-    
+
     .stButton>button {
         background-color: var(--accent-color);
         color: white;
         border-radius: 4px;
     }
-    
+
     .stSelectbox>div>div {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
     }
-    
+
     .stDataFrame {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
     }
-    
-    .positive {
-        color: var(--positive-color);
-        font-weight: bold;
-    }
-    
-    .negative {
-        color: var(--negative-color);
-        font-weight: bold;
-    }
-    
+
+    .positive { color: var(--positive-color); font-weight: bold; }
+    .negative { color: var(--negative-color); font-weight: bold; }
+
     .metric-card {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
@@ -101,7 +145,7 @@ st.markdown("""
         margin-bottom: 16px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
-    
+
     .alert-positive {
         background-color: rgba(63, 185, 80, 0.1);
         border: 1px solid var(--positive-color);
@@ -109,7 +153,7 @@ st.markdown("""
         padding: 8px;
         margin: 4px 0;
     }
-    
+
     .alert-negative {
         background-color: rgba(248, 81, 73, 0.1);
         border: 1px solid var(--negative-color);
@@ -117,7 +161,7 @@ st.markdown("""
         padding: 8px;
         margin: 4px 0;
     }
-    
+
     .news-item {
         background-color: var(--card-background);
         border: 1px solid var(--border-color);
@@ -125,613 +169,698 @@ st.markdown("""
         padding: 12px;
         margin-bottom: 8px;
     }
-    
-    .sentiment-positive {
-        color: var(--positive-color);
-    }
-    
-    .sentiment-negative {
-        color: var(--negative-color);
-    }
-    
-    .sentiment-neutral {
-        color: var(--text-color);
-    }
+
+    .sentiment-positive { color: var(--positive-color); }
+    .sentiment-negative { color: var(--negative-color); }
+    .sentiment-neutral  { color: var(--text-color); }
 </style>
-""", unsafe_allow_html=True)
+"""
 
-# Function to calculate RSI
-def calculate_rsi(data, window=14):
-    """
-    Calculate the Relative Strength Index (RSI) for the given data.
-    
-    Args:
-        data (pd.DataFrame): Stock data with 'Close' column
-        window (int): Period for RSI calculation (default: 14)
-    
-    Returns:
-        pd.Series: RSI values
-    """
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
-# Function to calculate MACD
-def calculate_macd(data, short_window=12, long_window=26, signal_window=9):
-    """
-    Calculate the Moving Average Convergence Divergence (MACD) for the given data.
-    
-    Args:
-        data (pd.DataFrame): Stock data with 'Close' column
-        short_window (int): Short period for EMA (default: 12)
-        long_window (int): Long period for EMA (default: 26)
-        signal_window (int): Signal line period (default: 9)
-    
-    Returns:
-        tuple: MACD line, Signal line, and Histogram
-    """
-    short_ema = data['Close'].ewm(span=short_window, adjust=False).mean()
-    long_ema = data['Close'].ewm(span=long_window, adjust=False).mean()
-    macd = short_ema - long_ema
-    signal = macd.ewm(span=signal_window, adjust=False).mean()
-    histogram = macd - signal
-    return macd, signal, histogram
+def _configure_page() -> None:
+    """Configure the Streamlit page and inject custom CSS."""
 
-# Function to calculate Moving Averages
-def calculate_moving_averages(data, windows=[5, 20, 50]):
-    """
-    Calculate Moving Averages for the given data.
-    
-    Args:
-        data (pd.DataFrame): Stock data with 'Close' column
-        windows (list): List of window sizes for moving averages
-    
-    Returns:
-        dict: Dictionary of moving averages
-    """
-    mas = {}
-    for window in windows:
-        mas[f'MA_{window}'] = data['Close'].rolling(window=window).mean()
-    return mas
-
-# Function to fetch stock data
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_stock_data(symbol, period="1mo", interval="1d"):
-    """
-    Fetch stock data from Yahoo Finance.
-    
-    Args:
-        symbol (str): Stock symbol
-        period (str): Time period for data
-        interval (str): Data interval
-    
-    Returns:
-        pd.DataFrame: Stock data
-    """
-    try:
-        stock = yf.Ticker(symbol)
-        data = stock.history(period=period, interval=interval)
-        return data
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {str(e)}")
-        return pd.DataFrame()
-
-# Function to fetch live price
-@st.cache_data(ttl=60)  # Cache for 1 minute
-def fetch_live_price(symbol):
-    """
-    Fetch live stock price from Yahoo Finance.
-    
-    Args:
-        symbol (str): Stock symbol
-    
-    Returns:
-        float: Current stock price
-    """
-    try:
-        stock = yf.Ticker(symbol)
-        data = stock.history(period="1d", interval="1m")
-        if not data.empty:
-            return data['Close'].iloc[-1]
-        return None
-    except Exception as e:
-        return None
-
-# Function to fetch news sentiment
-def fetch_news_sentiment(symbol):
-    """
-    Fetch and analyze news sentiment for a given stock.
-    
-    Args:
-        symbol (str): Stock symbol
-    
-    Returns:
-        list: List of news items with sentiment analysis
-    """
-    # This is a simplified version - in a real app, you would use a news API
-    # For demo purposes, we'll simulate news based on stock performance
-    try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        company_name = info.get('longName', symbol)
-        
-        # Simulate news articles
-        news_articles = [
-            f"{company_name} announces strong quarterly earnings beating analyst expectations",
-            f"{company_name} faces regulatory challenges in key markets",
-            f"Analysts upgrade {company_name} stock after product innovation",
-            f"{company_name} expands into new international markets",
-            f"Supply chain issues affect {company_name} production"
-        ]
-        
-        sentiments = []
-        for article in news_articles:
-            # Analyze sentiment using TextBlob
-            blob = TextBlob(str(article))  # Convert to string to avoid cached_property issue
-            polarity = blob.sentiment.polarity
-            if polarity > 0.1:
-                sentiment = "Positive"
-            elif polarity < -0.1:
-                sentiment = "Negative"
-            else:
-                sentiment = "Neutral"
-            sentiments.append({
-                "title": article,
-                "sentiment": sentiment,
-                "polarity": polarity
-            })
-        
-        return sentiments
-    except Exception as e:
-        return []
-
-# Function to check for alerts
-def check_alerts(data, symbol):
-    """
-    Check for trading alerts based on technical indicators.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-        symbol (str): Stock symbol
-    
-    Returns:
-        list: List of alert messages
-    """
-    alerts = []
-    
-    # Check RSI alerts
-    if len(data) >= 14:
-        rsi = calculate_rsi(data)
-        current_rsi = rsi.iloc[-1]
-        if current_rsi < 30:
-            alerts.append(f" oversold (RSI: {current_rsi:.2f})")
-        elif current_rsi > 70:
-            alerts.append(f" overbought (RSI: {current_rsi:.2f})")
-    
-    # Check Moving Average crossovers
-    if len(data) >= 50:
-        mas = calculate_moving_averages(data)
-        current_price = data['Close'].iloc[-1]
-        ma_5 = mas['MA_5'].iloc[-1]
-        ma_20 = mas['MA_20'].iloc[-1]
-        
-        # Check if price crossed above or below MA
-        prev_price = data['Close'].iloc[-2]
-        prev_ma_5 = mas['MA_5'].iloc[-2]
-        
-        if prev_price < prev_ma_5 and current_price > ma_5:
-            alerts.append(f" price crossed above 5-day MA (${ma_5:.2f})")
-        elif prev_price > prev_ma_5 and current_price < ma_5:
-            alerts.append(f" price crossed below 5-day MA (${ma_5:.2f})")
-    
-    return alerts
-
-# Function to create candlestick chart
-def create_candlestick_chart(data, symbol, show_mas=True, show_volume=True):
-    """
-    Create a candlestick chart with optional moving averages.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-        symbol (str): Stock symbol
-        show_mas (bool): Whether to show moving averages
-        show_volume (bool): Whether to show volume
-    
-    Returns:
-        go.Figure: Plotly figure object
-    """
-    fig = go.Figure()
-    
-    # Add candlestick chart
-    fig.add_trace(go.Candlestick(
-        x=data.index,
-        open=data['Open'],
-        high=data['High'],
-        low=data['Low'],
-        close=data['Close'],
-        name=symbol
-    ))
-    
-    # Add moving averages if enabled
-    if show_mas:
-        mas = calculate_moving_averages(data)
-        for key, ma in mas.items():
-            fig.add_trace(go.Scatter(
-                x=data.index,
-                y=ma,
-                mode='lines',
-                name=key,
-                line=dict(width=1)
-            ))
-    
-    # Update layout
-    fig.update_layout(
-        title=f"{symbol} Stock Price",
-        xaxis_title="Date",
-        yaxis_title="Price ($)",
-        height=500,
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    st.set_page_config(
+        page_title=CONFIG.app_title,
+        page_icon=CONFIG.page_icon,
+        layout=CONFIG.layout,
+        initial_sidebar_state=CONFIG.initial_sidebar_state,
     )
-    
-    return fig
+    st.markdown(_CSS, unsafe_allow_html=True)
 
-# Function to create volume chart
-def create_volume_chart(data):
-    """
-    Create a volume chart.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-    
-    Returns:
-        go.Figure: Plotly figure object
-    """
-    fig = go.Figure()
-    
-    # Color volume bars based on price movement
-    colors = ['green' if close > open else 'red' 
-              for close, open in zip(data['Close'], data['Open'])]
-    
-    fig.add_trace(go.Bar(
-        x=data.index,
-        y=data['Volume'],
-        marker_color=colors,
-        name="Volume"
-    ))
-    
-    fig.update_layout(
-        title="Trading Volume",
-        xaxis_title="Date",
-        yaxis_title="Volume",
-        height=200,
-        template="plotly_dark"
-    )
-    
-    return fig
 
-# Function to create RSI chart
-def create_rsi_chart(data):
-    """
-    Create an RSI chart.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-    
-    Returns:
-        go.Figure: Plotly figure object
-    """
-    rsi = calculate_rsi(data)
-    
-    fig = go.Figure()
-    
-    # Add RSI line
-    fig.add_trace(go.Scatter(
-        x=data.index,
-        y=rsi,
-        mode='lines',
-        name='RSI',
-        line=dict(color='blue')
-    ))
-    
-    # Add overbought/oversold lines
-    fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-    fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-    fig.add_hline(y=50, line_dash="dot", line_color="white")
-    
-    fig.update_layout(
-        title="Relative Strength Index (RSI)",
-        xaxis_title="Date",
-        yaxis_title="RSI",
-        height=300,
-        template="plotly_dark",
-        yaxis_range=[0, 100]
-    )
-    
-    return fig
+def _sidebar_controls() -> tuple[str, str, bool, bool]:
+    """Render the sidebar and return the selected options."""
 
-# Function to create MACD chart
-def create_macd_chart(data):
-    """
-    Create a MACD chart.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-    
-    Returns:
-        go.Figure: Plotly figure object
-    """
-    macd, signal, histogram = calculate_macd(data)
-    
-    fig = go.Figure()
-    
-    # Add MACD line
-    fig.add_trace(go.Scatter(
-        x=data.index,
-        y=macd,
-        mode='lines',
-        name='MACD',
-        line=dict(color='blue')
-    ))
-    
-    # Add Signal line
-    fig.add_trace(go.Scatter(
-        x=data.index,
-        y=signal,
-        mode='lines',
-        name='Signal',
-        line=dict(color='orange')
-    ))
-    
-    # Add Histogram
-    fig.add_trace(go.Bar(
-        x=data.index,
-        y=histogram,
-        name='Histogram',
-        marker_color=['green' if val >= 0 else 'red' for val in histogram]
-    ))
-    
-    fig.update_layout(
-        title="MACD (Moving Average Convergence Divergence)",
-        xaxis_title="Date",
-        yaxis_title="Value",
-        height=300,
-        template="plotly_dark"
-    )
-    
-    return fig
-
-# Function to create mini candlestick chart for watchlist
-def create_mini_chart(data, symbol):
-    """
-    Create a mini candlestick chart for the watchlist.
-    
-    Args:
-        data (pd.DataFrame): Stock data
-        symbol (str): Stock symbol
-    
-    Returns:
-        go.Figure: Plotly figure object
-    """
-    fig = go.Figure()
-    
-    # Add candlestick chart
-    fig.add_trace(go.Candlestick(
-        x=data.index[-30:],  # Last 30 data points
-        open=data['Open'][-30:],
-        high=data['High'][-30:],
-        low=data['Low'][-30:],
-        close=data['Close'][-30:],
-        name=symbol
-    ))
-    
-    fig.update_layout(
-        title=f"{symbol}",
-        height=150,
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        showlegend=False,
-        margin=dict(l=10, r=10, t=30, b=10)
-    )
-    
-    fig.update_xaxes(showticklabels=False)
-    fig.update_yaxes(showticklabels=False)
-    
-    return fig
-
-# Main app
-def main():
-    """
-    Main application function.
-    """
-    # App title
-    st.markdown("<h1 style='text-align: center; color: #58a6ff;'>📈 AI-Powered Stock Market Dashboard</h1>", unsafe_allow_html=True)
-    
-    # Sidebar
     st.sidebar.title("Dashboard Controls")
-    
-    # Extended stock list
-    default_stocks = [
-        'AAPL', 'MSFT', 'TSLA', 'GOOGL', 'AMZN', 'META', 'NVDA', 'NFLX', 'ADBE', 'PYPL',
-        'INTC', 'AMD', 'CRM', 'DIS', 'BA', 'JPM', 'V', 'JNJ', 'WMT', 'PG',
-        'MA', 'UNH', 'HD', 'BAC', 'VZ', 'XOM', 'KO', 'PFE', 'T', 'MRK'
-    ]
-    
-    # Stock selection
+
     selected_stock = st.sidebar.selectbox(
         "Select Stock",
-        default_stocks,
-        index=0
+        sorted(CONFIG.watchlist),
+        index=0,
     )
-    
-    # Time period selection
+
     time_period = st.sidebar.selectbox(
         "Select Time Period",
-        ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
-        index=2
+        sorted(CONFIG.valid_periods),
+        index=sorted(CONFIG.valid_periods).index(CONFIG.default_period),
     )
-    
-    # Chart controls
+
     st.sidebar.subheader("Chart Settings")
     show_mas = st.sidebar.checkbox("Show Moving Averages", value=True)
     show_volume = st.sidebar.checkbox("Show Volume", value=True)
-    
-    # Fetch data
-    data = fetch_stock_data(selected_stock, period=time_period if time_period else "1mo")
-    
-    if data.empty:
-        st.error("No data available for the selected stock and time period.")
-        return
-    
-    # Calculate indicators
-    rsi = calculate_rsi(data)
-    macd, signal, histogram = calculate_macd(data)
-    mas = calculate_moving_averages(data)
-    
-    # Check for alerts
-    alerts = check_alerts(data, selected_stock)
-    
-    # Main dashboard layout
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        # Stock metrics
-        current_price = data['Close'].iloc[-1]
-        previous_price = data['Close'].iloc[-2] if len(data) > 1 else current_price
-        price_change = current_price - previous_price
-        price_change_pct = (price_change / previous_price) * 100 if previous_price != 0 else 0
-        
-        # Display metrics
-        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-        
-        with metric_col1:
-            st.markdown(f"""
+
+    return selected_stock, time_period, show_mas, show_volume
+
+
+def _price_metrics(data: pd.DataFrame, mas: dict) -> dict:
+    """Compute headline metrics displayed in the dashboard."""
+
+    current_price = safe_float(data["Close"].iloc[-1])
+    previous_price = safe_float(data["Close"].iloc[-2]) if len(data) > 1 else current_price
+    price_change = current_price - previous_price
+    price_change_pct = (price_change / previous_price) * 100 if previous_price else 0.0
+
+    rsi_series = calculate_rsi(data)
+    current_rsi = latest_value(rsi_series)
+
+    macd_series, _, _ = calculate_macd(data)
+    current_macd = latest_value(macd_series)
+
+    ma_50_series = mas.get("MA_50")
+    current_ma_50 = latest_value(ma_50_series) if ma_50_series is not None else float("nan")
+
+    return {
+        "current_price": current_price,
+        "previous_price": previous_price,
+        "price_change": price_change,
+        "price_change_pct": price_change_pct,
+        "current_rsi": current_rsi,
+        "current_macd": current_macd,
+        "current_ma_50": current_ma_50,
+    }
+
+
+def _render_metric_cards(symbol: str, metrics: dict) -> None:
+    """Render the four headline metric cards."""
+
+    cols = st.columns(4)
+
+    with cols[0]:
+        cls = "positive" if metrics["price_change"] >= 0 else "negative"
+        st.markdown(
+            f"""
             <div class="metric-card">
-                <h3>{selected_stock}</h3>
-                <h2>${current_price:.2f}</h2>
-                <p class="{'positive' if price_change >= 0 else 'negative'}">
-                    {price_change:+.2f} ({price_change_pct:+.2f}%)
+                <h3>{symbol}</h3>
+                <h2>${metrics['current_price']:.2f}</h2>
+                <p class="{cls}">
+                    {metrics['price_change']:+.2f} ({metrics['price_change_pct']:+.2f}%)
                 </p>
             </div>
-            """, unsafe_allow_html=True)
-        
-        with metric_col2:
-            if len(rsi) > 0:
-                current_rsi = rsi.iloc[-1]
-                st.markdown(f"""
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with cols[1]:
+        current_rsi = metrics["current_rsi"]
+        if not is_nan(current_rsi):
+            tone = (
+                "positive"
+                if current_rsi < CONFIG.rsi_oversold
+                else "negative" if current_rsi > CONFIG.rsi_overbought else ""
+            )
+            label = (
+                "Oversold"
+                if current_rsi < CONFIG.rsi_oversold
+                else "Overbought" if current_rsi > CONFIG.rsi_overbought else "Neutral"
+            )
+            st.markdown(
+                f"""
                 <div class="metric-card">
                     <h3>RSI (14)</h3>
                     <h2>{current_rsi:.2f}</h2>
-                    <p class="{'positive' if current_rsi < 30 else 'negative' if current_rsi > 70 else ''}">
-                        {'Oversold' if current_rsi < 30 else 'Overbought' if current_rsi > 70 else 'Neutral'}
-                    </p>
+                    <p class="{tone}">{label}</p>
                 </div>
-                """, unsafe_allow_html=True)
-        
-        with metric_col3:
-            if len(macd) > 0:
-                current_macd = macd.iloc[-1]
-                st.markdown(f"""
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with cols[2]:
+        current_macd = metrics["current_macd"]
+        if not is_nan(current_macd):
+            tone = "positive" if current_macd > 0 else "negative"
+            label = "Bullish" if current_macd > 0 else "Bearish"
+            st.markdown(
+                f"""
                 <div class="metric-card">
                     <h3>MACD</h3>
                     <h2>{current_macd:.2f}</h2>
-                    <p class="{'positive' if current_macd > 0 else 'negative'}">
-                        {'Bullish' if current_macd > 0 else 'Bearish'}
-                    </p>
+                    <p class="{tone}">{label}</p>
                 </div>
-                """, unsafe_allow_html=True)
-        
-        with metric_col4:
-            if 'MA_50' in mas and len(mas['MA_50']) > 0:
-                ma_50 = mas['MA_50'].iloc[-1]
-                st.markdown(f"""
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with cols[3]:
+        ma_50 = metrics["current_ma_50"]
+        if not is_nan(ma_50):
+            tone = "positive" if metrics["current_price"] > ma_50 else "negative"
+            st.markdown(
+                f"""
                 <div class="metric-card">
                     <h3>MA (50)</h3>
                     <h2>${ma_50:.2f}</h2>
-                    <p class="{'positive' if current_price > ma_50 else 'negative'}">
-                        {current_price - ma_50:+.2f} vs MA
-                    </p>
+                    <p class="{tone}">{metrics['current_price'] - ma_50:+.2f} vs MA</p>
                 </div>
-                """, unsafe_allow_html=True)
-        
-        # Alerts section
-        if alerts:
-            st.subheader("🔔 Alerts")
-            for alert in alerts:
-                if "oversold" in alert or "crossed above" in alert:
-                    st.markdown(f"<div class='alert-positive'>⚠️ {selected_stock}{alert}</div>", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"<div class='alert-negative'>⚠️ {selected_stock}{alert}</div>", unsafe_allow_html=True)
-        
-        # Main price chart
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _render_alerts(symbol: str, alerts: list[Alert]) -> None:
+    """Render the alerts section."""
+
+    if not alerts:
+        return
+    st.subheader("🔔 Alerts")
+    for alert in alerts:
+        css_class = (
+            "alert-positive"
+            if alerts_have_positive([alert])
+            else "alert-negative" if alerts_have_negative([alert]) else ""
+        )
+        st.markdown(
+            f"<div class='{css_class}'>⚠️ {symbol}{alert.message}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_watchlist(selected: str, service: MarketDataService | None = None) -> list[Holding]:
+    """Render the watchlist column and return the holdings for inspection."""
+
+    st.subheader("Watchlist")
+    watchlist_stocks = [
+        s for s in sorted(CONFIG.watchlist)[: CONFIG.watchlist_size] if s != selected
+    ]
+    holdings: list[Holding] = []
+    market_service = service or get_default_service()
+    for stock in watchlist_stocks:
+        try:
+            watchlist_data = market_service.get_daily_history(stock, period="1mo")
+        except (InvalidSymbolError, SymbolNotFoundError, MarketDataError) as exc:
+            logger.warning("Skipping watchlist entry %s: %s", stock, exc)
+            continue
+        if watchlist_data.empty:
+            continue
+        holding = summarise_price_frame(stock, watchlist_data)
+        holdings.append(holding)
+        cls = "positive" if holding.change >= 0 else "negative"
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <h4>{stock}</h4>
+                <p>${holding.current_price:.2f}
+                <span class="{cls}">({holding.change_pct:+.2f}%)</span></p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(create_mini_chart(watchlist_data, stock), use_container_width=True)
+    return holdings
+
+
+def _sentiment_class(label: str) -> str:
+    if label == "Positive":
+        return "sentiment-positive"
+    if label == "Negative":
+        return "sentiment-negative"
+    return "sentiment-neutral"
+
+
+def _format_timestamp(dt: object) -> str:
+    try:
+        from datetime import datetime
+
+        if isinstance(dt, str):
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        if hasattr(dt, "astimezone"):
+            local = dt.astimezone()  # type: ignore[attr-defined]
+            return local.strftime("%b %d, %Y %H:%M %Z").strip()
+    except Exception:  # noqa: BLE001 - formatting must never break the UI
+        pass
+    return "unknown time"
+
+
+# ---------------------------------------------------------------------------
+# ML Pipeline Integration
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(show_spinner="Building features and target…")
+def _build_ml_dataset(data: pd.DataFrame, horizon: int = 1) -> tuple[pd.DataFrame, pd.Series]:
+    """Build leakage-safe features and aligned target for a given symbol."""
+    features = build_feature_frame(data, windows=(5, 20, 50))
+    target = build_target(data, horizon=horizon, threshold=0.0)
+    return align_features_target(features, target)
+
+
+@st.cache_data(show_spinner="Preparing time-aware splits…")
+def _time_aware_splits(
+    features: pd.DataFrame,
+    target: pd.Series,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+    test_frac: float = 0.2,
+    gap: int = 1,
+    min_train: int = 20,
+) -> tuple:
+    """Return chronological train/validation/test splits with purge gaps."""
+    return time_aware_split(
+        features,
+        target,
+        train_fraction=train_frac,
+        validation_fraction=val_frac,
+        test_fraction=test_frac,
+        gap_rows=gap,
+        min_train_rows=min_train,
+    )
+
+
+@st.cache_resource(show_spinner="Training models…")
+def _train_ml_models(
+    features: pd.DataFrame,
+    target: pd.Series,
+    *,
+    config: TrainingConfig | None = None,
+) -> tuple[dict[str, ModelBundle], dict, dict, str]:
+    """Train and compare models, returning bundles, comparisons, split info, and selected name."""
+    try:
+        result = train_models(features, target, config=config)
+        bundles = result.bundles
+        comparisons = {
+            name: {
+                "validation_metrics": comp.validation_metrics,
+                "test_metrics": comp.test_metrics,
+                "baseline_metrics": comp.baseline_metrics,
+                "selected": comp.selected,
+            }
+            for name, comp in result.comparisons.items()
+        }
+        return bundles, comparisons, result.split_info, result.selected_model_name
+    except Exception as exc:  # noqa: BLE001 - surface gracefully in UI
+        logger.exception("Model training failed: %s", exc)
+        return {}, {}, {}, ""
+
+
+@st.cache_data(show_spinner="Generating prediction…")
+def _make_prediction(
+    bundle: ModelBundle,
+    data: pd.DataFrame,
+    symbol: str,
+) -> PredictionResult:
+    """Predict direction for the latest available feature row."""
+    return predict_from_history(bundle, data, symbol=symbol)
+
+
+def _render_ml_section(
+    symbol: str,
+    data: pd.DataFrame,
+    market_service: MarketDataService,
+) -> None:
+    """Render the educational ML prediction section with disclaimers and details."""
+    st.markdown("---")
+    st.subheader("🧪 Educational ML Prediction (Not Financial Advice)")
+
+    # Explicit disclaimer
+    st.warning(
+        (
+            "**⚠️ IMPORTANT DISCLAIMER**\n\n"
+            "This prediction is **educational only** — it is **not a fact, "
+            "recommendation, guarantee, or automated trading signal**.\n\n"
+            "- The model predicts the *direction* of the next-day close return "
+            "(up/down) using historical patterns only.\n"
+            "- Probabilities are model outputs, **not** calibrated confidence "
+            "intervals or guarantees.\n"
+            "- Past performance does not predict future results. Markets are "
+            "influenced by countless unpredictable factors.\n"
+            "- **Do not make investment decisions based on this output.** "
+            "Consult a qualified financial advisor."
+        ),
+        icon="⚠️",
+    )
+
+    # Check minimum history requirements
+    min_rows = 60  # minimum for feature engineering + splits
+    if len(data) < min_rows:
+        st.info(
+            f"Insufficient history for ML prediction: need at least {min_rows} daily rows, "
+            f"got {len(data)}. Select a longer time period (e.g., 1y or 2y)."
+        )
+        return
+
+    # Build dataset (cached)
+    features, target = _build_ml_dataset(data)
+    if features.empty or target.empty:
+        st.info(
+            "Unable to build ML dataset — not enough valid feature/target "
+            "rows after alignment."
+        )
+        return
+
+    # Train models (cached)
+    bundles, comparisons, split_info, selected_name = _train_ml_models(features, target)
+
+    if not bundles or not selected_name:
+        st.info(
+            "Model training did not produce a usable model. This can happen "
+            "with limited data or class imbalance."
+        )
+        return
+
+    selected_bundle = bundles[selected_name]
+    metadata = selected_bundle.metadata
+
+    # Prediction for latest row
+    prediction = _make_prediction(selected_bundle, data, symbol)
+
+    if not prediction.is_available:
+        st.info("Prediction unavailable for the latest row — insufficient features or model error.")
+        return
+
+    # --- Display Prediction ---
+    st.markdown("### 📊 Latest Prediction")
+
+    pred_cols = st.columns([1, 1, 1, 1])
+    with pred_cols[0]:
+        direction_label = "📈 Up" if prediction.prediction == "up" else "📉 Down"
+        st.metric("Predicted Direction", direction_label)
+    with pred_cols[1]:
+        st.metric("Probability (Winning Class)", f"{prediction.probability:.1%}")
+    with pred_cols[2]:
+        st.metric("Up Probability", f"{prediction.up_probability:.1%}")
+    with pred_cols[3]:
+        st.metric("Down Probability", f"{prediction.down_probability:.1%}")
+
+    # Model metadata
+    st.markdown("### 🤖 Model Details")
+    meta_cols = st.columns([1, 1])
+    with meta_cols[0]:
+        st.caption(f"**Model:** {metadata.model_name}")
+        st.caption(f"**Version:** {metadata.model_version}")
+        st.caption(f"**Target:** {metadata.target_definition}")
+    with meta_cols[1]:
+        st.caption(f"**Trained:** {_format_timestamp(metadata.trained_at)}")
+        st.caption(
+            f"**Training Window:** {metadata.training_start} → "
+            f"{metadata.training_end}"
+        )
+        st.caption(
+            f"**Rows — Train/Val/Test:** {metadata.train_rows} / "
+            f"{metadata.validation_rows} / {metadata.test_rows}"
+        )
+
+    # Validation vs Test comparison
+    st.markdown("### 📈 Validation vs Test Performance")
+    comp = comparisons[selected_name]
+    val_metrics = comp["validation_metrics"]
+    test_metrics = comp["test_metrics"]
+    baseline = comp["baseline_metrics"]
+
+    metrics_to_show = [
+        ("Balanced Accuracy", "balanced_accuracy"),
+        ("F1 Score", "f1"),
+        ("Precision", "precision"),
+        ("Recall", "recall"),
+        ("ROC-AUC", "roc_auc"),
+    ]
+
+    metric_rows = []
+    for label, key in metrics_to_show:
+        val = val_metrics.get(key)
+        test = test_metrics.get(key)
+        base = baseline.get(key)
+        metric_rows.append({
+            "Metric": label,
+            "Validation": f"{val:.3f}" if val is not None else "N/A",
+            "Test": f"{test:.3f}" if test is not None else "N/A",
+            "Baseline (Majority Class)": f"{base:.3f}" if base is not None else "N/A",
+        })
+
+    st.dataframe(pd.DataFrame(metric_rows), hide_index=True, use_container_width=False)
+
+    st.caption(
+
+            "Model is selected on **validation** performance only; test metrics "
+            "are shown for transparency. "
+            "Baseline is a majority-class classifier (predicts the most "
+            "frequent class)."
+
+    )
+
+    # Top feature explanations
+    st.markdown("### 🔍 Top Feature Explanations")
+    st.caption(
+
+            "Explanations show **association, not causation**. "
+            "Tree importances are global (split frequency), not local "
+            "contributions for this specific prediction."
+
+    )
+
+    try:
+        # Get the latest transformed feature row
+        transformed = selected_bundle.preprocessor.transform(features)
+        latest_row = transformed.iloc[[-1]]
+        feature_names = selected_bundle.feature_names
+
+        # Get explanations
+        explanations = explain_prediction(
+            selected_bundle.estimator,
+            feature_names,
+            latest_row,
+            top_n=10,
+        )
+
+        if explanations:
+            expl_df = pd.DataFrame(explanations)
+            # Show relevant columns
+            display_cols = ["feature", "scope", "interpretation"]
+            if "contribution" in expl_df.columns:
+                display_cols.insert(1, "contribution")
+            elif "importance" in expl_df.columns:
+                display_cols.insert(1, "importance")
+
+            st.dataframe(expl_df[display_cols], hide_index=True, use_container_width=False)
+        else:
+            st.info("No explanations available for this model type.")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Explanation generation failed: %s", exc)
+        st.info("Feature explanations unavailable for this model.")
+
+    # Global model importance (fallback)
+    st.markdown("#### Global Feature Importance (Training-Time)")
+    try:
+        global_explanations = explain_model(
+            selected_bundle.estimator,
+            selected_bundle.feature_names,
+            top_n=10,
+        )
+        if global_explanations:
+            global_df = pd.DataFrame(global_explanations)
+            st.dataframe(global_df, hide_index=True, use_container_width=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Global explanation failed: %s", exc)
+
+    # Split info
+    with st.expander("📋 Split Details"):
+        st.json(split_info)
+
+
+def _article_to_chart_dict(item: ArticleSentiment) -> dict:
+    return {
+        "title": item.article.title,
+        "label": item.label,
+        "polarity": item.positive_prob - item.negative_prob,
+        "positive_prob": item.positive_prob,
+        "neutral_prob": item.neutral_prob,
+        "negative_prob": item.negative_prob,
+        "confidence": item.confidence,
+    }
+
+
+def _render_aggregate_sentiment(agg: AggregateSentiment) -> None:
+    """Render an aggregated (market/window) sentiment block."""
+
+    st.markdown(
+        f"**Aggregate market sentiment ({agg.window}) — {agg.label}** "
+        f"· confidence {agg.confidence:.0%} · {agg.article_count} article(s) analyzed"
+    )
+    st.caption(
+        "Aggregate sentiment is the mean of per-article model probabilities, "
+        "not a prediction of future price movement."
+    )
+    cols = st.columns(3)
+    cols[0].metric("Positive", f"{agg.positive_prob:.0%}")
+    cols[1].metric("Neutral", f"{agg.neutral_prob:.0%}")
+    cols[2].metric("Negative", f"{agg.negative_prob:.0%}")
+    st.plotly_chart(
+        create_aggregate_sentiment_chart(
+            agg.positive_prob,
+            agg.neutral_prob,
+            agg.negative_prob,
+            label=agg.label,
+        ),
+        use_container_width=True,
+    )
+
+
+def _render_article(item: ArticleSentiment, service: NewsDataService) -> None:
+    article = item.article
+    cls = _sentiment_class(item.label)
+    url = article.url or "#"
+    ts = _format_timestamp(article.published_at)
+    st.markdown(
+        f"""
+        <div class="news-item">
+            <a href="{url}" target="_blank">{article.title}</a>
+            <p><small>{article.source} · {ts} · analyzed by {item.model}</small></p>
+            <p class="{cls}">{item.label} ({item.confidence:.0%}) —
+            pos {item.positive_prob:.0%} · neu {item.neutral_prob:.0%} ·
+            neg {item.negative_prob:.0%}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_news(symbol: str, news_service: NewsDataService | None = None) -> None:
+    """Render the real news sentiment panel."""
+
+    st.subheader("News Sentiment")
+    service = news_service or get_default_news_service()
+
+    try:
+        scored = service.get_news_with_sentiment(symbol)
+    except InvalidSymbolError as exc:
+        st.warning(f"{symbol} is not a valid ticker — news unavailable.")
+        logger.info("News skipped for invalid symbol %s: %s", symbol, exc)
+        return
+    except NewsDataError as exc:
+        logger.warning("News fetch failed for %s: %s", symbol, exc)
+        st.info(
+            "News is temporarily unavailable for this stock. "
+            "This may be due to rate limiting, a missing API key, or a network "
+            "issue. Prices and indicators are unaffected."
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - never crash the dashboard
+        logger.exception("Unexpected news error for %s: %s", symbol, exc)
+        st.info("News is temporarily unavailable for this stock.")
+        return
+
+    if not scored:
+        st.info("No recent news available for this stock.")
+        return
+
+    status = service.provider_status(len(scored))
+    st.caption(
+        f"Source: {status.name} · Model: {status.model} · "
+        f"{len(scored)} article(s) analyzed"
+    )
+
+    try:
+        aggregate = service.get_aggregate_sentiment(symbol, window="recent")
+        _render_aggregate_sentiment(aggregate)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Aggregate sentiment unavailable: %s", exc)
+
+    try:
+        trend = service.get_news_trend(symbol, days=7)
+        if trend:
+            st.plotly_chart(
+                create_sentiment_trend_chart(trend, symbol=symbol),
+                use_container_width=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Sentiment trend unavailable: %s", exc)
+
+    st.plotly_chart(
+        create_sentiment_breakdown_chart(
+            [_article_to_chart_dict(item) for item in scored[: CONFIG.news_limit]]
+        ),
+        use_container_width=True,
+    )
+
+    st.caption(
+        "Each dot is a real article. Sentiment is the model's classification "
+        "of the headline/description text, not a price forecast."
+    )
+    for item in scored[: CONFIG.news_limit]:
+        _render_article(item, service)
+
+
+def main() -> None:
+    """Application entrypoint."""
+
+    configure_logging()
+    _configure_page()
+
+    st.markdown(
+        f"<h1 style='text-align: center; color: #58a6ff;'>"
+        f"{CONFIG.page_icon} {CONFIG.app_title}</h1>",
+        unsafe_allow_html=True,
+    )
+
+    selected_stock, time_period, show_mas, show_volume = _sidebar_controls()
+
+    market_service = get_default_service()
+    try:
+        data = market_service.get_history(selected_stock, period=time_period, interval="1d")
+    except (InvalidSymbolError, SymbolNotFoundError, MarketDataError) as exc:
+        logger.error("Unable to load data for %s: %s", selected_stock, exc)
+        st.error(f"Unable to load data for {selected_stock}: {exc}")
+        return
+    if data is None or data.empty:
+        st.error("No data available for the selected stock and time period.")
+        return
+
+    mas = calculate_moving_averages(data)
+    metrics = _price_metrics(data, mas)
+    alerts = generate_alerts(data, selected_stock)
+
+    col_main, col_side = st.columns([3, 1])
+
+    with col_main:
+        _render_metric_cards(selected_stock, metrics)
+        _render_alerts(selected_stock, alerts)
+
         st.subheader(f"{selected_stock} Price Chart")
-        price_chart = create_candlestick_chart(data, selected_stock, show_mas, show_volume)
-        st.plotly_chart(price_chart, use_container_width=True)
-        
-        # Technical indicators charts
+        st.plotly_chart(
+            create_candlestick_chart(data, selected_stock, show_mas, show_volume),
+            use_container_width=True,
+        )
+
         st.subheader("Technical Indicators")
-        tab1, tab2 = st.tabs(["RSI", "MACD"])
-        
-        with tab1:
-            rsi_chart = create_rsi_chart(data)
-            st.plotly_chart(rsi_chart, use_container_width=True)
-        
-        with tab2:
-            macd_chart = create_macd_chart(data)
-            st.plotly_chart(macd_chart, use_container_width=True)
-        
-        # Volume chart
+        tab_rsi, tab_macd, tab_bb, tab_stoch, tab_vol = st.tabs(
+            ["RSI", "MACD", "Bollinger", "Stochastic", "Volatility"]
+        )
+        with tab_rsi:
+            st.plotly_chart(create_rsi_chart(data), use_container_width=True)
+        with tab_macd:
+            st.plotly_chart(create_macd_chart(data), use_container_width=True)
+        with tab_bb:
+            st.plotly_chart(create_bollinger_chart(data, selected_stock), use_container_width=True)
+        with tab_stoch:
+            st.plotly_chart(create_stochastic_chart(data), use_container_width=True)
+        with tab_vol:
+            st.plotly_chart(create_volatility_chart(data), use_container_width=True)
+
+        st.subheader("Volume & Risk")
+        tab_obv, tab_atr, tab_dd = st.tabs(["OBV", "ATR", "Drawdown"])
+        with tab_obv:
+            st.plotly_chart(create_obv_chart(data), use_container_width=True)
+        with tab_atr:
+            st.plotly_chart(create_atr_chart(data), use_container_width=True)
+        with tab_dd:
+            st.plotly_chart(create_drawdown_chart(data), use_container_width=True)
+
         if show_volume:
             st.subheader("Trading Volume")
-            volume_chart = create_volume_chart(data)
-            st.plotly_chart(volume_chart, use_container_width=True)
-    
-    with col2:
-        # Watchlist
-        st.subheader("Watchlist")
-        watchlist_stocks = [s for s in default_stocks[:10] if s != selected_stock]  # Show top 10 stocks
-        
-        for stock in watchlist_stocks:
-            watchlist_data = fetch_stock_data(stock, period="1mo")
-            if not watchlist_data.empty:
-                current = watchlist_data['Close'].iloc[-1]
-                previous = watchlist_data['Close'].iloc[-2] if len(watchlist_data) > 1 else current
-                change = current - previous
-                change_pct = (change / previous) * 100 if previous != 0 else 0
-                
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h4>{stock}</h4>
-                    <p>${current:.2f} <span class="{'positive' if change >= 0 else 'negative'}">({change_pct:+.2f}%)</span></p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Mini chart
-                mini_chart = create_mini_chart(watchlist_data, stock)
-                st.plotly_chart(mini_chart, use_container_width=True)
-        
-        # News sentiment
-        st.subheader("News Sentiment")
-        news_sentiments = fetch_news_sentiment(selected_stock)
-        
-        if news_sentiments:
-            for news in news_sentiments[:5]:  # Show top 5 news
-                sentiment_class = "sentiment-positive" if news['sentiment'] == "Positive" else \
-                                 "sentiment-negative" if news['sentiment'] == "Negative" else "sentiment-neutral"
-                
-                st.markdown(f"""
-                <div class="news-item">
-                    <p>{news['title']}</p>
-                    <p class="{sentiment_class}">Sentiment: {news['sentiment']} ({news['polarity']:.2f})</p>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No news available for this stock.")
+            st.plotly_chart(create_volume_chart(data), use_container_width=True)
+
+    with col_side:
+        _render_watchlist(selected_stock, get_default_service())
+        _render_news(selected_stock, get_default_news_service())
+
+    # Educational ML Prediction Section
+    _render_ml_section(selected_stock, data, market_service)
+
+    # Live price is fetched but kept available for future widgets. Surfacing
+    # it through the logger avoids changing the UI while keeping the call.
+    live_price: float | None = get_current_price(selected_stock, service=market_service)
+    if live_price is not None:
+        logger.debug("Live price for %s: %.2f", selected_stock, live_price)
+
 
 if __name__ == "__main__":
     main()

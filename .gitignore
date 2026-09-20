@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+coverage.xml
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# ML artefacts
+*.pkl
+*.joblib
+*.h5
+*.onnx
+artifacts/
+mlruns/
+
+# Local environment files
+.env
+.env.local
+
+# Test fixtures that should not be committed
+tests/fixtures/local/
