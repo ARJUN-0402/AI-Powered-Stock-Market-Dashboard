@@ -24,9 +24,9 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from src.ml.evaluation import classification_metrics, compare_model_metrics
 from src.ml.preprocessing import (
-    FEATURE_GROUPS,
     TARGET_DEFINITION,
     FeaturePreprocessor,
+    _feature_groups,
     align_features_target,
     time_aware_split,
 )
@@ -139,11 +139,6 @@ def _library_versions() -> dict[str, str]:
     except ImportError:
         versions["xgboost"] = "unavailable"
     return versions
-    return {
-        "python": platform.python_version(),
-        "scikit-learn": sklearn.__version__,
-        "xgboost": xgboost_version,
-    }
 
 
 def _jsonable(value: Any) -> Any:
@@ -312,7 +307,7 @@ def train_models(
                 model_name, preprocessor.fitted_feature_names_, config, train_features.index
             ),
             feature_names=tuple(preprocessor.fitted_feature_names_),
-            feature_groups=dict(FEATURE_GROUPS),
+            feature_groups=_feature_groups(preprocessor.fitted_feature_names_),
             trained_at=_utc_now(),
             training_start=str(train_features.index.min()),
             training_end=str(train_features.index.max()),

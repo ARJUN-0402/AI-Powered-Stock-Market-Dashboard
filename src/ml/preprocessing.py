@@ -31,8 +31,10 @@ from src.features.technical_indicators import calculate_moving_averages
 
 TARGET_DEFINITION = (
     "Binary direction of the simple Close return over the next horizon: "
-    "1 when Close[t+horizon] / Close[t] - 1 is positive, 0 when negative, "
-    "and NaN for a zero return or when the future close is unavailable."
+    "1 when the return is above the configured positive threshold and 0 when "
+    "it is below the negative threshold. The default threshold is 0.0; a "
+    "positive threshold creates a neutral band whose rows are NaN, as are rows "
+    "without an available future close."
 )
 
 FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
@@ -41,6 +43,7 @@ FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
         "log_return_1",
         "rolling_return_5",
         "rolling_return_20",
+        "rolling_return_50",
         "volatility_20",
         "drawdown",
     ),
@@ -52,6 +55,9 @@ FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
         "MA_5",
         "MA_20",
         "MA_50",
+        "price_ma_ratio_5",
+        "price_ma_ratio_20",
+        "price_ma_ratio_50",
         "bollinger_position",
         "bollinger_width",
         "atr_percent",
@@ -61,6 +67,22 @@ FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
         "volume_zscore_20",
     ),
 }
+
+
+def _feature_groups(feature_names: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """Return static feature groups plus any aligned market-context features."""
+
+    names = list(feature_names)
+    groups = {group: tuple(name for name in values if name in names) for group, values in FEATURE_GROUPS.items()}
+    context_suffixes = ("_return_1", "_volatility_20", "_volatility_indicator")
+    context_names = tuple(
+        name
+        for name in names
+        if any(name.endswith(suffix) for suffix in context_suffixes)
+    )
+    if context_names:
+        groups["market_context"] = context_names
+    return groups
 
 
 def _validate_frame(data: pd.DataFrame, *, require_ohlcv: bool = False) -> pd.DataFrame:
@@ -148,6 +170,8 @@ def build_feature_frame(
     clean_windows = sorted({int(window) for window in windows})
     if not clean_windows or clean_windows[0] < 1:
         raise ValueError("windows must contain positive integers")
+    if not isinstance(context_lag, int) or context_lag < 1:
+        raise ValueError("context_lag must be a positive integer")
 
     log_return = np.log(close / close.shift(1)).where(close > 0)
     result = pd.DataFrame(index=frame.index)
@@ -225,6 +249,8 @@ def build_target(
         raise ValueError("horizon must be at least 1")
     if threshold < 0:
         raise ValueError("threshold must be non-negative")
+    if not np.isfinite(threshold):
+        raise ValueError("threshold must be finite")
     frame = _validate_frame(data)
     close = pd.to_numeric(frame[price_column], errors="coerce")
     forward_return = _safe_ratio(close.shift(-horizon), close) - 1

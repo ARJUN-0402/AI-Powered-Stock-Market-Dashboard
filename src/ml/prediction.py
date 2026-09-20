@@ -63,11 +63,19 @@ def _index_timestamp(index: pd.Index) -> str | None:
 def _probability_from_estimator(estimator: Any, features: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     if hasattr(estimator, "predict_proba"):
         probabilities = np.asarray(estimator.predict_proba(features), dtype=float)
-        if probabilities.ndim != 2 or probabilities.shape[1] < 2:
+        if probabilities.ndim != 2 or probabilities.shape[1] != 2:
             raise ValueError("estimator predict_proba must return two class columns")
         classes = np.asarray(getattr(estimator, "classes_", [0, 1]))
-        up_index = int(np.where(classes == 1)[0][0]) if 1 in classes else 1
-        down_index = 1 - up_index if probabilities.shape[1] == 2 else int(np.where(classes == 0)[0][0])
+        if classes.size != 2:
+            raise ValueError("estimator classes_ must contain exactly two classes")
+        if 1 in classes:
+            up_index = int(np.flatnonzero(classes == 1)[0])
+            down_index = int(np.flatnonzero(classes != 1)[0])
+        elif 0 in classes:
+            down_index = int(np.flatnonzero(classes == 0)[0])
+            up_index = int(np.flatnonzero(classes != 0)[0])
+        else:
+            raise ValueError("binary estimator classes must include class 0 or 1")
         return probabilities[:, up_index], probabilities[:, down_index]
     if hasattr(estimator, "decision_function"):
         scores = np.asarray(estimator.decision_function(features), dtype=float)
@@ -139,7 +147,7 @@ def predict(
             explanation = tuple(
                 explain_prediction(estimator, feature_names, row, top_n=10)
             )
-        except (TypeError, ValueError, RuntimeError):
+        except (IndexError, RuntimeError, TypeError, ValueError):
             explanation = ()
         return PredictionResult(
             symbol=symbol,

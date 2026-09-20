@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
@@ -87,9 +88,10 @@ def classification_metrics(
 
     majority = int(np.bincount(true, minlength=2).argmax())
     baseline_pred = np.full_like(true, majority)
-    metrics["baseline"] = {
+    baseline = {
         "majority_class": majority,
         "accuracy": float(accuracy_score(true, baseline_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(true, baseline_pred)),
         "precision": float(
             precision_score(true, baseline_pred, pos_label=positive_label, zero_division=0)
         ),
@@ -97,7 +99,9 @@ def classification_metrics(
             recall_score(true, baseline_pred, pos_label=positive_label, zero_division=0)
         ),
         "f1": float(f1_score(true, baseline_pred, pos_label=positive_label, zero_division=0)),
+        "roc_auc": None,
     }
+    metrics["baseline"] = baseline
     return metrics
 
 
